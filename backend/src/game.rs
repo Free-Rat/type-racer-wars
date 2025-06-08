@@ -1,63 +1,67 @@
-use std::collections::HashMap;
-use uuid::Uuid;
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::{HashMap, HashSet},
+    // sync::{Arc, Mutex},
+    sync::Arc,
+};
+use tokio::time::Instant;
 
-#[derive(Clone)]
-pub struct PlayerState {
-    pub id: Uuid,
-    pub words_typed: usize,
-    pub current_word: String,
+// — Protocol:
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(tag = "type", content = "payload", rename_all = "camelCase")]
+pub enum ServerMsg {
+    LobbyUpdate {
+        players: Vec<String>,
+    },
+    NameConflict,
+    Countdown {
+        seconds_left: u8,
+    },
+    StartRace {
+        text: String,
+    },
+    Feedback {
+        char: String,
+        correct: bool,
+        position: usize,
+    },
+    ProgressUpdate {
+        name: String,
+        position: usize,
+    },
+    Finish {
+        name: String,
+        time_ms: u128,
+    },
+    RaceResult {
+        results: Vec<(String, u128)>,
+    },
+    Error {
+        message: String,
+    },
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type", content = "payload", rename_all = "camelCase")]
+pub enum ClientMsg {
+    Join {
+        room: String,
+        name: String,
+        reconnect: bool,
+    },
+    Keystroke {
+        char: String,
+    },
+}
+
+// — Per‐game state & alias:
 pub struct GameState {
-    pub players: HashMap<Uuid, PlayerState>,
-    pub text: Vec<String>,
+    pub players: HashSet<String>,
+    pub positions: HashMap<String, usize>,
+    pub finishes: Vec<(String, u128)>,
+    pub text: String,
+    pub race_start: Option<Instant>,
 }
 
-impl GameState {
-    pub fn new(text: Vec<String>) -> Self {
-        Self {
-            players: HashMap::new(),
-            text,
-        }
-    }
-
-    pub fn register_player(&mut self, id: Uuid) {
-        self.players.insert(
-            id,
-            PlayerState {
-                id,
-                words_typed: 0,
-                current_word: String::new(),
-            },
-        );
-    }
-
-    pub fn update_word(&mut self, id: Uuid, word: &str) -> Option<(bool, Option<Uuid>)> {
-        let player = self.players.get_mut(&id)?;
-
-        // Sprawdź czy to słowo, które powinien wpisać
-        let expected = self.text.get(player.words_typed)?;
-
-        if word == expected {
-            player.words_typed += 1;
-            player.current_word = String::new();
-            return Some((true, None));
-        }
-
-        // Sprawdź, czy to słowo innego gracza
-        for (other_id, other_player) in &mut self.players {
-            if other_id != &id && word == other_player.current_word {
-                other_player.words_typed = other_player.words_typed.saturating_sub(2);
-                return Some((false, Some(*other_id)));
-            }
-        }
-
-        Some((false, None))
-    }
-
-    pub fn update_typing(&mut self, id: Uuid, partial: String) {
-        if let Some(p) = self.players.get_mut(&id) {
-            p.current_word = partial;
-        }
-    }
-}
+// pub type Rooms = Arc<Mutex<HashMap<String, GameState>>>;
+pub type Rooms = Arc<tokio::sync::Mutex<HashMap<String, GameState>>>;

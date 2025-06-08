@@ -1,5 +1,13 @@
 const socket = new WebSocket("ws://localhost:3000/ws");
 
+socket.addEventListener('open', () => console.log('[WS] open'));
+socket.addEventListener('error', err => console.error('[WS] error', err));
+socket.addEventListener('close', () => console.log('[WS] closed'));
+socket.addEventListener('message', event => {
+  console.log('[WS] raw message:', event.data);
+  // onMessage(event);
+});
+
 const canvas = document.getElementById('game');
 canvas.height = window.innerHeight;
 canvas.width = window.innerWidth;
@@ -21,33 +29,81 @@ const state = {
     results: []            // array of { name, timeMs }
 };
 
+const playerColors = {};
+const colorPalette = ['blue', 'orange', 'magenta', 'cyan', 'lime', 'pink', 'gold'];
+
+function getPlayerColor(name) {
+    if (!playerColors[name]) {
+        playerColors[name] = colorPalette[Object.keys(playerColors).length % colorPalette.length];
+    }
+    return playerColors[name];
+}
+
 // --- WebSocket setup ---
 let playerName = null;
-socket.addEventListener('open', promptAndJoin);
+let roomId = null;
+socket.addEventListener('open', () => {
+  // isReconnection = true to tell the server "Hey, I was already here"
+  promptAndJoin(/* isReconnection = */ true);
+});
 socket.addEventListener('message', onMessage);
 
-function promptAndJoin() {
+// function promptAndJoin(isRoom = false) {
+//     if (!roomId || !isRoom) {
+//         roomId = prompt('Enter your room:');
+//     }
+//     if (!roomId) return promptAndJoin();
+//     playerName = prompt('Enter your name:');
+//     if (!playerName) return promptAndJoin();
+//     msg = { type: 'join', payload: { name: playerName , room: roomId} }
+//     socket.send(JSON.stringify(msg));
+//     console.log(msg)
+// }
+
+function promptAndJoin(isReconnection = false) {
+  // try stored values first
+  if (!isReconnection && localStorage.roomId && localStorage.playerName) {
+    roomId   = localStorage.roomId;
+    playerName = localStorage.playerName;
+  } else {
     roomId = prompt('Enter your room:');
     if (!roomId) return promptAndJoin();
     playerName = prompt('Enter your name:');
     if (!playerName) return promptAndJoin();
-    socket.send(JSON.stringify({ type: 'join', payload: { name: playerName , room: roomId} }));
+    // persist them
+    localStorage.roomId = roomId;
+    localStorage.playerName = playerName;
+  }
+
+  socket.send(JSON.stringify({
+    type: 'join',
+    payload: { room: roomId, name: playerName, reconnect: isReconnection }
+  }));
 }
 
 function onMessage(event) {
     const msg = JSON.parse(event.data);
+    console.log(msg)
     switch (msg.type) {
         case 'lobbyUpdate':
             state.phase = 'lobby';
             state.players = msg.payload.players; // array of names
             break;
         case 'nameConflict':
+            // Fix: delay prompt so user input doesn't race message flow
+            // const currentPlayers = state.players || [];
+            // if (!currentPlayers.includes(playerName)) {
+            //     setTimeout(() => {
+            //         alert('Name already taken, please choose another.');
+            //         promptAndJoin(true);
+            //     }, 100);  // slight delay to prevent overlap
+            // };
             alert('Name already taken, please choose another.');
             promptAndJoin();
             return;
         case 'countdown':
             state.phase = 'countdown';
-            state.countdown = msg.payload.secondsLeft;
+            state.countdown = msg.payload.seconds_left;
             break;
         case 'startRace':
             state.phase = 'race';
@@ -82,10 +138,12 @@ window.addEventListener('keydown', e => {
     let char = e.key;
     if (char === 'Backspace') char = '\b';
     if (char.length > 1 && char !== '\b' && char !== 'Enter') return;
-    socket.send(JSON.stringify({
+    msg = {
         type: 'keystroke',
         payload: { char }
-    }));
+    }
+    socket.send(JSON.stringify(msg));
+    console.log(msg)
 });
 
 // --- Rendering ---
@@ -111,7 +169,8 @@ function drawLobby() {
     ctx.fillStyle = '#fff';
     ctx.fillText('Waiting for players...', 20, 20);
     state.players.forEach((p, i) => {
-        ctx.fillText(`• ${p.name}`, 20, 60 + i * 30);
+        // ctx.fillText(`• ${p.name}`, 20, 60 + i * 30);
+        ctx.fillText(`• ${p}`, 20, 60 + i * 30);
     });
 }
 
@@ -122,56 +181,110 @@ function drawCountdown() {
     ctx.font = '20px sans-serif';
 }
 
-function drawRace() {
-    const x0 = 20, y0 = 20, lineHeight = 30;
-    let x = x0, y = y0;
-    for (let i = 0; i < state.text.length; i++) {
-        const ch = state.text[i];
-        const status = state.charStates[i];
-        if (status === 'correct') ctx.fillStyle = 'green';
-        else if (status === 'wrong') ctx.fillStyle = 'red';
-        else ctx.fillStyle = '#555';
-        ctx.fillText(ch, x, y);
-        x += ctx.measureText(ch).width;
-        if (ch === '\n' || x > canvas.width - 20) {
-            x = x0;
-            y += lineHeight;
-        }
-    }
-    // draw other players' cursors as dots
-    for (const [id, pos] of Object.entries(state.otherProgress)) {
-        const coords = getCharCoords(pos);
-        ctx.fillStyle = 'blue';
-        ctx.fillRect(coords.x, coords.y + 22, 4, 4);
-    }
-}
-
 function drawResults() {
-    ctx.fillStyle = '#000';
+    ctx.fillStyle = '#fff';
     ctx.fillText('Results:', 20, 20);
     state.results.forEach((r, i) => {
+        const [name, timeMs] = r;  // destructure the tuple
         ctx.fillText(
-            `${i+1}. ${r.name} - ${(r.timeMs/1000).toFixed(2)}s`, 
-            20, 
+            `${i + 1}. ${name} - ${(timeMs / 1000).toFixed(2)}s`,
+            20,
             60 + i * 30
         );
     });
 }
 
-// Helper: compute on-canvas coords for char index
-function getCharCoords(index) {
-    const x0 = 20, y0 = 20, lineHeight = 30;
-    let x = x0, y = y0;
-    for (let i = 0; i < index && i < state.text.length; i++) {
-        const ch = state.text[i];
-        x += ctx.measureText(ch).width;
-        if (ch === '\n' || x > canvas.width - 20) {
-            x = x0;
-            y += lineHeight;
+function drawRace() {
+    const y0 = 20, lineHeight = 30;
+    let line = '';
+    let lines = [];
+
+    for (let ch of state.text) {
+        const testLine = line + ch;
+        const width = ctx.measureText(testLine).width;
+        if (ch === '\n' || width > canvas.width - 40) {
+            lines.push(line);
+            line = ch === '\n' ? '' : ch;
+        } else {
+            line = testLine;
         }
     }
-    return { x, y };
+    if (line) lines.push(line);
+
+    const totalHeight = lines.length * lineHeight;
+    let y = (canvas.height - totalHeight) / 2;
+
+    let charIndex = 0;
+    for (let l = 0; l < lines.length; l++) {
+        const lineText = lines[l];
+        const lineWidth = ctx.measureText(lineText).width;
+        let x = (canvas.width - lineWidth) / 2;
+
+        for (let i = 0; i < lineText.length; i++) {
+            const ch = lineText[i];
+            const status = state.charStates[charIndex];
+            // if (status === 'correct') ctx.fillStyle = 'green';
+            //
+            // console.log('status:', status, 'i:', i, 'position:', state.position);
+            if (status === 'correct' || i < state.position) ctx.fillStyle = 'green';
+            else if (status === 'wrong') ctx.fillStyle = 'red';
+            else ctx.fillStyle = '#555';
+            ctx.fillText(ch, x, y);
+            x += ctx.measureText(ch).width;
+            charIndex++;
+        }
+        y += lineHeight;
+    }
+
+    // draw other players' cursors as dots
+    for (const [id, pos] of Object.entries(state.otherProgress)) {
+        const coords = getCharCoords(pos);
+        ctx.fillStyle = getPlayerColor(id);
+        ctx.fillRect(coords.x, coords.y + 22, 6, 6);
+    }
 }
 
+// Helper: compute on-canvas coords for char index
+function getCharCoords(index) {
+    const lineHeight = 30;
+    const padding = 20;
+
+    let lines = [];
+    let line = '';
+    let charCount = 0;
+
+    for (let ch of state.text) {
+        const testLine = line + ch;
+        const width = ctx.measureText(testLine).width;
+        if (ch === '\n' || width > canvas.width - 40) {
+            lines.push(line);
+            line = ch === '\n' ? '' : ch;
+        } else {
+            line = testLine;
+        }
+    }
+    if (line) lines.push(line);
+
+    const totalHeight = lines.length * lineHeight;
+    const yStart = (canvas.height - totalHeight) / 2;
+
+    let count = 0;
+    for (let l = 0; l < lines.length; l++) {
+        const lineText = lines[l];
+        const lineWidth = ctx.measureText(lineText).width;
+        let x = (canvas.width - lineWidth) / 2;
+        let y = yStart + l * lineHeight;
+
+        for (let i = 0; i < lineText.length; i++) {
+            if (count === index) {
+                return { x, y };
+            }
+            x += ctx.measureText(lineText[i]).width;
+            count++;
+        }
+    }
+
+    return { x: canvas.width - padding, y: yStart + lines.length * lineHeight };
+}
 // Initial draw
 render();
