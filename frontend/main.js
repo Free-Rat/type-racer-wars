@@ -1,11 +1,48 @@
+// import {
+//   drawLobby,
+//   drawCountdown,
+//   drawRace,
+//   drawResults
+// } from './render.js';
+
 const socket = new WebSocket("ws://localhost:3000/ws");
 
-socket.addEventListener('open', () => console.log('[WS] open'));
+function encodeString(str) {
+  const utf8 = new TextEncoder().encode(str);
+  const buf = new Uint8Array(2 + utf8.length);
+  const dv = new DataView(buf.buffer);
+  dv.setUint16(0, utf8.length, false);
+  buf.set(utf8, 2);
+  return buf;
+}
+
+function decodeString(buf, offset) {
+  const dv = new DataView(buf.buffer, buf.byteOffset + offset);
+  const len = dv.getUint16(0, false);
+  const strBytes = new Uint8Array(buf.buffer, buf.byteOffset + offset + 2, len);
+  return [new TextDecoder().decode(strBytes), 2 + len];
+}
+
+socket.addEventListener('open', () => {
+  console.log('[WS] open');
+  // on reconnect attempt
+  promptAndJoin(/* isReconnection = */ true);
+});
 socket.addEventListener('error', err => console.error('[WS] error', err));
 socket.addEventListener('close', () => console.log('[WS] closed'));
-socket.addEventListener('message', event => {
-  console.log('[WS] raw message:', event.data);
-  // onMessage(event);
+
+socket.addEventListener('message', async event => {
+  let buf;
+  if (event.data instanceof Blob) {
+    const arrayBuffer = await event.data.arrayBuffer();
+    buf = new Uint8Array(arrayBuffer);
+  } else if (event.data instanceof ArrayBuffer) {
+    buf = new Uint8Array(event.data);
+  } else {
+    console.warn('[WS] Unexpected message type:', typeof event.data);
+    return;
+  }
+  handleServer(buf);
 });
 
 const canvas = document.getElementById('game');
@@ -42,11 +79,7 @@ function getPlayerColor(name) {
 // --- WebSocket setup ---
 let playerName = null;
 let roomId = null;
-socket.addEventListener('open', () => {
-  // isReconnection = true to tell the server "Hey, I was already here"
-  promptAndJoin(/* isReconnection = */ true);
-});
-socket.addEventListener('message', onMessage);
+// socket.addEventListener('message', onMessage);
 
 // function promptAndJoin(isRoom = false) {
 //     if (!roomId || !isRoom) {
@@ -59,6 +92,20 @@ socket.addEventListener('message', onMessage);
 //     socket.send(JSON.stringify(msg));
 //     console.log(msg)
 // }
+
+// Sending Join:
+function sendJoin(room, name, reconnect) {
+  const type = 0;
+  const roomBuf = encodeString(room);
+  const nameBuf = encodeString(name);
+  const buf = new Uint8Array(1 + roomBuf.length + nameBuf.length + 1);
+  let off = 0;
+  buf[off++] = type;
+  buf.set(roomBuf, off); off += roomBuf.length;
+  buf.set(nameBuf, off); off += nameBuf.length;
+  buf[off] = reconnect ? 1 : 0;
+  socket.send(buf);
+}
 
 function promptAndJoin(isReconnection = false) {
   // try stored values first
@@ -75,75 +122,128 @@ function promptAndJoin(isReconnection = false) {
     localStorage.playerName = playerName;
   }
 
-  socket.send(JSON.stringify({
-    type: 'join',
-    payload: { room: roomId, name: playerName, reconnect: isReconnection }
-  }));
+  sendJoin(roomId, playerName, isReconnection)
 }
 
-function onMessage(event) {
-    const msg = JSON.parse(event.data);
-    console.log(msg)
-    switch (msg.type) {
-        case 'lobbyUpdate':
-            state.phase = 'lobby';
-            state.players = msg.payload.players; // array of names
-            break;
-        case 'nameConflict':
-            // Fix: delay prompt so user input doesn't race message flow
-            // const currentPlayers = state.players || [];
-            // if (!currentPlayers.includes(playerName)) {
-            //     setTimeout(() => {
-            //         alert('Name already taken, please choose another.');
-            //         promptAndJoin(true);
-            //     }, 100);  // slight delay to prevent overlap
-            // };
-            alert('Name already taken, please choose another.');
-            promptAndJoin();
-            return;
-        case 'countdown':
-            state.phase = 'countdown';
-            state.countdown = msg.payload.seconds_left;
-            break;
-        case 'startRace':
-            state.phase = 'race';
-            state.text = msg.payload.text;
-            state.charStates = Array.from(state.text, () => 'pending');
-            state.position = 0;
-            state.otherProgress = {};
-            break;
-        case 'feedback':
-            const { correct, position } = msg.payload;
-            state.charStates[position] = correct ? 'correct' : 'wrong';
-            if (correct) state.position = position + 1;
-            break;
-        case 'progressUpdate':
-            state.otherProgress[msg.payload.name] = msg.payload.position;
-            break;
-        case 'raceResult':
-            state.phase = 'finished';
-            state.results = msg.payload.results; // array of { name, timeMs }
-            break;
-        case 'error':
-            alert('Error: ' + msg.payload.message);
-            return;
+// Handling incoming server messages:
+function handleServer(buf) {
+  let off = 0;
+  const type = buf[off++];
+  switch (type) {
+    case 2: { // LobbyUpdate
+      const dv = new DataView(buf.buffer, buf.byteOffset + off);
+      const count = dv.getUint16(0, false);
+      off += 2;
+      const players = [];
+      for (let i = 0; i < count; i++) {
+        const [name, len] = decodeString(buf, off);
+        off += len;
+        players.push(name);
+      }
+      state.phase = 'lobby';
+      state.players = players;
+      render();
+      break;
     }
-    render();
+    case 3: { // NameConflict
+      alert('Name already taken, please choose another.');
+      promptAndJoin();
+      break;
+    }
+    case 4: { // Countdown
+      const seconds = buf[off++];
+      state.phase = 'countdown';
+      state.countdown = seconds;
+      render();
+      break;
+    }
+    case 5: { // StartRace
+      const dv = new DataView(buf.buffer, buf.byteOffset + off);
+      const len = dv.getUint16(0, false);
+      off += 2;
+      const textBytes = new Uint8Array(buf.buffer, buf.byteOffset + off, len);
+      state.phase = 'race';
+      state.text = new TextDecoder().decode(textBytes);
+      state.charStates = Array.from(state.text, () => 'pending');
+      state.position = 0;
+      state.otherProgress = {};
+      render();
+      break;
+    }
+    case 6: { // Feedback
+      const dv = new DataView(buf.buffer, buf.byteOffset + off);
+      const pos = dv.getUint16(0, false);
+      off += 2;
+      const correct = buf[off++] !== 0;
+      const [ch, len] = decodeString(buf, off);
+      off += len;
+      state.charStates[pos] = correct ? 'correct' : 'wrong';
+      if (correct) state.position = pos + 1;
+      render();
+      break;
+    }
+    case 7: { // ProgressUpdate
+      const [name, nameLen] = decodeString(buf, off);
+      off += nameLen;
+      const dv = new DataView(buf.buffer, buf.byteOffset + off);
+      const pos = dv.getUint16(0, false);
+      state.otherProgress[name] = pos;
+      render();
+      break;
+    }
+    case 8: { // Finish
+      const [name, nameLen2] = decodeString(buf, off);
+      off += nameLen2;
+      const dv = new DataView(buf.buffer, buf.byteOffset + off);
+      const timeMs = dv.getBigUint64(0, false);
+      // Optionally store individual finishes
+      render();
+      break;
+    }
+    case 9: { // RaceResult
+      const dv = new DataView(buf.buffer, buf.byteOffset + off);
+      const countR = dv.getUint16(0, false);
+      off += 2;
+      const results = [];
+      for (let i = 0; i < countR; i++) {
+        const [nm, l] = decodeString(buf, off);
+        off += l;
+        const dv2 = new DataView(buf.buffer, buf.byteOffset + off);
+        const t = dv2.getBigUint64(0, false);
+        off += 8;
+        results.push([nm, Number(t)]);
+      }
+      state.phase = 'finished';
+      state.results = results;
+      render();
+      break;
+    }
+    default:
+      console.warn('Unknown msg type:', type);
+  }
 }
 
 // --- Handle keyboard ---
+// Sending Keystroke:
+function sendKeystroke(char) {
+  const type = 1;
+  const charUtf8 = new TextEncoder().encode(char);
+  const buf = new Uint8Array(1 + 2 + charUtf8.length);
+  buf[0] = type;
+  const dv = new DataView(buf.buffer);
+  dv.setUint16(1, charUtf8.length, false);
+  buf.set(charUtf8, 3);
+  socket.send(buf);
+}
+
 window.addEventListener('keydown', e => {
     // TODO: check if posision = len(text) then dont send
     if (state.phase !== 'race') return;
     let char = e.key;
     if (char === 'Backspace') char = '\b';
     if (char.length > 1 && char !== '\b' && char !== 'Enter') return;
-    msg = {
-        type: 'keystroke',
-        payload: { char }
-    }
-    socket.send(JSON.stringify(msg));
-    console.log(msg)
+    sendKeystroke(char)
+    console.log(char)
 });
 
 // --- Rendering ---
@@ -288,3 +388,4 @@ function getCharCoords(index) {
 }
 // Initial draw
 render();
+

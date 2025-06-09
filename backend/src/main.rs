@@ -4,18 +4,20 @@ use tokio::sync::Mutex;
 // use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
+use crate::game::Rooms;
 
 mod game;
 mod ws;
 
 #[tokio::main]
 async fn main() {
-    // Broadcast channel for server-to-client messages: (room, ServerMsg)
-    let (tx, _) = broadcast::channel::<(String, game::ServerMsg)>(100);
+
+    // Broadcast channel: (room_id, ServerMsgTag, raw payload bytes)
+    let (tx, _) = broadcast::channel::<(String, u8, Vec<u8>)>(100);
 
     // Shared map of room_id -> GameState
     // let rooms: game::Rooms = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-    let rooms: game::Rooms = Arc::new(Mutex::new(std::collections::HashMap::new()));
+    let rooms: Rooms = Arc::new(Mutex::new(std::collections::HashMap::new()));
 
     // Build our application with a route
     let app = Router::new()
